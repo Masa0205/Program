@@ -93,7 +93,7 @@ class DQNAgent:
         self.buffer_size = 10000
         self.batch_size = 32
         self.state_size = 4
-        self.action_size = 5
+        self.action_size = 4
 
         self.replay_buffer = ReplayBuffer(self.buffer_size, self.batch_size)
         self.qnet = QNet(self.state_size, self.action_size)
@@ -187,10 +187,7 @@ def get_state(nodeID, t_start):
     state = []
     for edge in net.getNode(nodeID).getIncoming():
         vehicles = traci.edge.getLastStepVehicleNumber(edge.getID())
-        if vehicles > 0:
-            state.append(1)
-        else:
-            state.append(0)
+        state.append(vehicles)
     
     #print("state=", state)
 
@@ -223,10 +220,10 @@ def traffic_control(nodeID, action, prev_t_start): #nodeID=交差点
                 control_obj[edge] = v
         except:
             pass
-    if action != 4:
-        #print("何もしない")  # next_action=4 の場合は変更なし
-        PRIORITY[nodeID] = junction_edges[action]
-        t_start = traci.simulation.getTime()
+
+    #print("何もしない")  # next_action=4 の場合は変更なし
+    PRIORITY[nodeID] = junction_edges[action]
+    t_start = traci.simulation.getTime()
     # 優先車線を動的に設定
 
     for edge in control_obj:

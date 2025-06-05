@@ -19,7 +19,7 @@ from sumolib import checkBinary
 import traci
 import traci.constants as tc
 import sumolib
-import copy
+import copy 
 from collections import deque
 import torch
 import torch.nn as nn
@@ -46,7 +46,8 @@ SPEED = 5
 DISTANCE = SPEED * 10
 net = sumolib.net.readNet('data/crossroads.net.xml')
 JUNCTION_NODE = "gneJ4"
-PRIORITY = {JUNCTION_NODE:"gneE5"}
+PRIORITY = {JUNCTION_NODE:"-gneE5"}
+
 
 class ReplayBuffer:
     def __init__(self, buffer_size, batch_size):
@@ -62,7 +63,8 @@ class ReplayBuffer:
 
     def get_batch(self):
         data = random.sample(self.buffer, self.batch_size)
-
+        #print(data)
+        #print("\n")
         state = torch.tensor(np.stack([x[0] for x in data]))
         action = torch.tensor(np.array([x[1] for x in data]).astype(np.long))
         reward = torch.tensor(np.array([x[2] for x in data]).astype(np.float32))
@@ -93,7 +95,7 @@ class DQNAgent:
         self.buffer_size = 10000
         self.batch_size = 32
         self.state_size = 6
-        self.action_size = 5
+        self.action_size = 4
 
         self.replay_buffer = ReplayBuffer(self.buffer_size, self.batch_size)
         self.qnet = QNet(self.state_size, self.action_size)
@@ -133,10 +135,10 @@ class DQNAgent:
     def sync_qnet(self):
         self.qnet_target.load_state_dict(self.qnet.state_dict())
 
-    def save(self, path="output/DQN_Q.txt"):
+    def save(self, path):
         torch.save(self.qnet.state_dict(), path)
 
-    def load(self, path="output/DQN_Q.txt"):
+    def load(self, path):
         self.qnet.load_state_dict(torch.load(path))
         self.qnet_target.load_state_dict(self.qnet.state_dict())
         
@@ -224,8 +226,9 @@ def traffic_control(nodeID, action, prev_t_start): #nodeID=交差点
                 control_obj[edge] = v
         except:
             pass
-    if action != 4:
-        #print("何もしない")  # next_action=4 の場合は変更なし
+    
+    
+    if PRIORITY[nodeID] != junction_edges[action]:
         PRIORITY[nodeID] = junction_edges[action]
         t_start = traci.simulation.getTime()
     # 優先車線を動的に設定
@@ -240,27 +243,33 @@ def traffic_control(nodeID, action, prev_t_start): #nodeID=交差点
     return t_start
     
 
-def get_reward():
+def get_reward(prev_wait):
     reward = 0
     teleport_occurs = 0
-    t_wait = 0
+    current_wait = 0
 
     teleport_occurs = traci.simulation.getEndingTeleportNumber()
     #待機時間報酬
     for edge in junction_edges:
-        t_wait += traci.edge.getWaitingTime(edge)
-    reward -= t_wait
+        current_wait += traci.edge.getWaitingTime(edge)
+    reward -= current_wait - prev_wait
 
     #テレポート報酬
     if teleport_occurs > 0:
-        reward -= teleport_occurs * 50
+        reward -= teleport_occurs * 5
 
     #print("reward=", reward)
-    return reward
+    return current_wait, reward
 
 def set_simulation_time_limit(limit):
     global SIMULATION_TIME_LIMIT
     SIMULATION_TIME_LIMIT = limit
+
+def reward_save(episode, episode_reward):
+    with open(file, "a", encoding="utf-8") as f:
+        f.write(f"{episode}\t{episode_reward}\n")
+
+    
 
 sync_interval = 20
 agent = DQNAgent()
@@ -280,7 +289,11 @@ def simulation(num, episode_num):
         state = get_state(JUNCTION_NODE, t_start)
         done = False
         total_reward = 0
-        
+        prev_wait = 0
+        prev_time = 1
+        current_time = 0
+        epsilon = 0.1 + 0.9 * math.exp(-1. * episode / 100)
+        action = 0
 
 
         for i in range(num):
@@ -288,42 +301,49 @@ def simulation(num, episode_num):
 
         while not done and traci.simulation.getMinExpectedNumber() > 0 and SIMULATION_TIME_LIMIT > time:
             traci.simulationStep()
+            current_time = int(traci.simulation.getTime())
             if traci.simulation.getMinExpectedNumber() == 0 or time >= SIMULATION_TIME_LIMIT:
                 done = True
             teleported_vehicles = traci.simulation.getEndingTeleportIDList()
             for vehID in teleported_vehicles:
                 traci.vehicle.setSpeed(vehID, SPEED)
-            epsilon = 0.1 + 0.9 * math.exp(-1. * episode / 100)
-            action = agent.get_action(state, epsilon)
-            t_start = traffic_control(node, action, t_start)
-            reward = get_reward()
-            next_state = get_state(node, t_start)
-            print(next_state,"\n")
-            agent.update(state, action, reward, next_state, done)
-            state = next_state
-            total_reward += reward
+            if prev_time != current_time and current_time%10 == 0:
+                action = agent.get_action(state, epsilon)
+                t_start = traffic_control(node, action, t_start)
+                reward, prev_wait = get_reward(prev_wait)
+                next_state = get_state(node, t_start)
+                #print(next_state,"\n")
+                agent.update(state, action, reward, next_state, done)
+                state = next_state
+                total_reward += reward
+                prev_time = current_time
+            traffic_control(node, action, t_start)
             teleportNum += traci.simulation.getEndingTeleportNumber()
-            time = traci.simulation.getTime()
-            if episode % sync_interval == 0:
-                agent.sync_qnet()
-            reward_history.append(total_reward)
-            if episode % 10 == 0:
-                print("episode :{}, total reward : {}".format(episode, total_reward))
+        if episode % sync_interval == 0:
+            agent.sync_qnet()
+        reward_history.append(total_reward)
+        if episode % 10 == 0:
+            print("episode :{}, total reward : {}".format(episode, total_reward))
+        reward_save(episode, total_reward)
         traci.close()
 
-mode = input("Mode (train/test): ").strip().lower()
+mode = input("Mode (train/test) :").strip().lower()
 num_of_vehicles = int(input("Num of vehicles :"))
 num_of_episode = int(input("Num of episode :"))
+name = input("what is rewardfilename :")
+filename = "reward_" + name + ".txt"
+file = os.path.join("output", filename)
 limit = 3600
+
 set_simulation_time_limit(limit)
 
 if mode == "train":
     simulation(num_of_vehicles, num_of_episode)
-    agent.save("dqn_model.pth")
+    agent.save("output/dqn_model.pth")
     print("Model saved to dqn_model.pth")
 
 elif mode == "test":
-    agent.load("dqn_model.pth")
+    agent.load("output/dqn_model.pth")
     print("Model loaded from dqn_model.pth")
 
     def test_simulation(num, episode_num):
@@ -339,22 +359,27 @@ elif mode == "test":
             state = get_state(JUNCTION_NODE, t_start)
             done = False
             total_reward = 0
-
+            prev_reward = 0
+            prev_time = 1
+            current_time = 0
+            action = 0
             for i in range(num):
                 make_vehicle(f"vehicle_{i}", make_random_route(i), 0)
 
             while not done and traci.simulation.getMinExpectedNumber() > 0 and SIMULATION_TIME_LIMIT > time:
                 traci.simulationStep()
+                time = traci.simulation.getTime()
                 if traci.simulation.getMinExpectedNumber() == 0 or time >= SIMULATION_TIME_LIMIT:
                     done = True
-                action = agent.get_action(state, epsilon=0.0)  # 探索なし
-                t_start = traffic_control(node, action, t_start)
-                reward = get_reward()
-                next_state = get_state(node, t_start)
-                state = next_state
-                total_reward += reward
-                time = traci.simulation.getTime()
-
+                if prev_time != current_time and current_time%10 == 0:
+                    action = agent.get_action(state, epsilon=0.0)  # 探索なし
+                    t_start = traffic_control(node, action, t_start)
+                    reward, prev_reward = get_reward(prev_reward)
+                    next_state = get_state(node, t_start)
+                    state = next_state
+                    prev_time = current_time
+                    total_reward += reward
+                traffic_control(node, action, t_start)
             print(f"[Test] Episode {episode}, total reward: {total_reward}")
             traci.close()
     test_simulation(num_of_vehicles, num_of_episode)
